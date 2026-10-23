@@ -15,6 +15,7 @@ use librespot::{
         player::{Player, PlayerEvent},
     },
 };
+use source::Source;
 use std::{
     fs::{self, File, OpenOptions},
     io,
@@ -35,6 +36,9 @@ mod audio_guard;
 mod auth;
 mod control;
 mod device;
+mod nav_player;
+mod navidrome;
+mod source;
 mod spectrum;
 mod tui;
 mod voice;
@@ -213,10 +217,31 @@ fn options() -> Result<Option<Options>, String> {
                 }
                 return Err("Pairing connection closed before login completed".into());
             }
-            "--play" | "--resume" | "--pause" | "--next" | "--previous" | "--toggle"
-            | "--volume" | "--voice" | "--spectrum" | "--release" => {
+            "--navidrome-setup" => {
+                let url = args.next().ok_or("missing Navidrome URL")?;
+                let user = args.next().ok_or("missing Navidrome user")?;
+                navidrome::setup_cli(&url, &user)?;
+                println!("OK");
+                return Ok(None);
+            }
+            "--play" | "--navidrome" | "--spotify" | "--source" | "--resume" | "--pause"
+            | "--next" | "--previous" | "--toggle" | "--volume" | "--voice" | "--spectrum"
+            | "--release" => {
                 let command = match arg.as_str() {
                     "--play" => format!("PLAY {}", args.next().ok_or("missing music query")?),
+                    "--navidrome" => {
+                        format!(
+                            "NAVIDROME PLAY {}",
+                            args.next().ok_or("missing music query")?
+                        )
+                    }
+                    "--spotify" => {
+                        format!("SPOTIFY PLAY {}", args.next().ok_or("missing music query")?)
+                    }
+                    "--source" => format!(
+                        "SOURCE {}",
+                        args.next().ok_or("missing source")?.to_uppercase()
+                    ),
                     "--resume" => "RESUME".to_owned(),
                     "--pause" => "PAUSE".to_owned(),
                     "--next" => "NEXT".to_owned(),
@@ -249,7 +274,7 @@ fn options() -> Result<Option<Options>, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "spotiya [--state-dir PATH] [--name NAME] [--no-buttons] [--no-voice]\nspotiya --tui | --login | --status | --version\nspotiya --play QUERY | --resume | --pause | --toggle | --next | --previous\nspotiya --volume 0..100 | --voice on/off | --spectrum on/off | --release"
+                    "spotiya [--state-dir PATH] [--name NAME] [--no-buttons] [--no-voice]\nspotiya --tui | --login | --status | --version\nspotiya --navidrome-setup URL USER   (password from stdin)\nspotiya --source spotify|navidrome | --navidrome QUERY | --spotify QUERY\nspotiya --play QUERY | --resume | --pause | --toggle | --next | --previous\nspotiya --volume 0..100 | --voice on/off | --spectrum on/off | --release"
                 );
                 return Ok(None);
             }
@@ -257,6 +282,17 @@ fn options() -> Result<Option<Options>, String> {
         }
     }
     Ok(Some(result))
+}
+fn step_volume(mixer: &MasterMixer, up: bool) {
+    let old = percent(mixer.volume()) as i32;
+    let target = (old + if up { 5 } else { -5 }).clamp(0, 100) as u16;
+    mixer.set_volume(from_percent(target));
+}
+fn read_source(path: &Path) -> Source {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| Source::parse(&s))
+        .unwrap_or(Source::Spotify)
 }
 fn instance_lock(dir: &Path) -> io::Result<File> {
     fs::create_dir_all(dir)?;
@@ -325,6 +361,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spectrum_supported = options.buttons && device::mini2_display_available();
     let spectrum_enabled =
         spectrum_supported && fs::read_to_string(&spectrum_setting).is_ok_and(|s| s.trim() == "1");
+    let source_file = options.state_dir.join("default-source");
+    let mut default_source = read_source(&source_file);
+    let mut current = default_source;
+    let mut navidrome_client = navidrome::Config::load(&options.state_dir)
+        .and_then(|c| navidrome::Client::new(c).ok())
+        .map(Arc::new);
     let last_track_file = options.state_dir.join("last-track");
     let mut last_track = fs::read_to_string(&last_track_file)
         .ok()
@@ -372,6 +414,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let backend = audio_backend::find(Some("alsa".into())).expect("ALSA compiled");
     let visual = shared.spectrum.clone();
+    let nav_visual = shared.spectrum.clone();
     let player = Player::new(
         player_config,
         session.clone(),
@@ -384,14 +427,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     let mut events = player.get_player_event_channel();
+    let (nav_tx, mut nav_events) = mpsc::unbounded_channel();
+    let nav = nav_player::spawn(
+        move || {
+            Box::new(spectrum::VisualSink::new(
+                backend(Some("default".into()), AudioFormat::S16),
+                nav_visual,
+            ))
+        },
+        tokio::runtime::Handle::current(),
+        nav_tx,
+        config.tmp_dir.join("navidrome"),
+    )?;
+    nav.configure(navidrome_client.clone());
+    let (resolved_tx, mut resolved_rx) =
+        mpsc::unbounded_channel::<(u64, Result<Vec<navidrome::Track>, String>)>();
+    let mut play_seq = 0u64;
     let (voice_tx, mut voice_rx) = mpsc::channel(8);
     let voice_watch = tokio::spawn(voice::watch(voice_tx.clone()));
     let (login_tx, mut login_rx) = mpsc::channel::<auth::Login>(1);
     let control_config = config.clone();
+    let control_dir = options.state_dir.clone();
     let voice_control = tokio::spawn(async move {
-        if control::serve(voice_tx, login_tx, control_config, spectrum_supported)
-            .await
-            .is_err()
+        if control::serve(
+            voice_tx,
+            login_tx,
+            control_config,
+            spectrum_supported,
+            control_dir,
+        )
+        .await
+        .is_err()
         {
             eprintln!("voice: local control socket unavailable");
         }
@@ -429,6 +495,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spectrum_supported,
         ..Default::default()
     };
+    let mut spotify_meta: Option<(String, String, String, u32)> = None;
     let mut position_at = Instant::now();
     let mut position_ms = 0u32;
     eprintln!("receiver: ready, integrated buttons/ring/display; one Master volume");
@@ -480,7 +547,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 retry_at=Instant::now()+Duration::from_secs(5);eprintln!("receiver: reconnect scheduled");
             },
             Some(event)=events.recv()=>{
+                if matches!(event,PlayerEvent::Playing{..}|PlayerEvent::Loading{..}) && current!=Source::Spotify {
+                    nav.stop();current=Source::Spotify;
+                    // Resuming the same Spotify track sends no TrackChanged, so restore its metadata.
+                    if let Some((title,artist,album,duration))=spotify_meta.clone() {
+                        info.title=title;info.artist=artist;info.album=album;info.duration_ms=duration;
+                    }
+                }
                 match event {
+                    PlayerEvent::VolumeChanged{..}=>{shared.volume.store(mixer.volume(),Ordering::Release);},
+                    _ if current!=Source::Spotify=>{},
                     PlayerEvent::Playing{track_id,position_ms:position,..}=>{
                         position_ms=position;position_at=Instant::now();
                         shared.active.store(true,Ordering::Release);shared.paused.store(false,Ordering::Relaxed);
@@ -503,21 +579,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             librespot::metadata::audio::UniqueFields::Episode{show_name,..}=>{info.artist=show_name;info.album.clear();},
                             librespot::metadata::audio::UniqueFields::Local{artists,album,..}=>{info.artist=artists.unwrap_or_default();info.album=album.unwrap_or_default();},
                         }
+                        spotify_meta=Some((info.title.clone(),info.artist.clone(),info.album.clone(),info.duration_ms));
                     },
-                    PlayerEvent::VolumeChanged{..}=>{shared.volume.store(mixer.volume(),Ordering::Release);},
                     _=>{},
                 }
             },
+            Some(event)=nav_events.recv()=>{
+                match event {
+                    nav_player::Event::Started(track) if current==Source::Navidrome=>{
+                        info.title=track.title;info.artist=track.artist;info.album=track.album;info.duration_ms=track.duration_ms;
+                        position_ms=0;position_at=Instant::now();
+                        shared.active.store(true,Ordering::Release);shared.paused.store(false,Ordering::Relaxed);
+                    },
+                    nav_player::Event::Resumed if current==Source::Navidrome=>{
+                        position_ms=nav.position_ms();position_at=Instant::now();
+                        shared.active.store(true,Ordering::Release);shared.paused.store(false,Ordering::Relaxed);
+                    },
+                    nav_player::Event::Paused if current==Source::Navidrome=>{
+                        position_ms=nav.position_ms();position_at=Instant::now();
+                        shared.paused.store(true,Ordering::Relaxed);
+                    },
+                    nav_player::Event::Stopped if current==Source::Navidrome=>{
+                        shared.active.store(false,Ordering::Release);current=default_source;
+                    },
+                    nav_player::Event::Failed(message)=>eprintln!("navidrome: {message}"),
+                    _=>{},
+                }
+            },
+            Some((seq,result))=resolved_rx.recv()=>{
+                if seq!=play_seq {continue;}
+                match result {
+                    Ok(queue)=>{
+                        if current==Source::Spotify && shared.active.load(Ordering::Acquire)
+                            && let Some(handle)=spirc.as_ref() {let _=handle.pause();}
+                        current=Source::Navidrome;
+                        eprintln!("voice: Navidrome queue started ({} tracks)",queue.len());
+                        nav.play(queue);
+                    },
+                    Err(e)=>eprintln!("voice: Navidrome search failed: {e}"),
+                }
+            },
             Some(command)=command_rx.recv()=>{
-                let ok=if let Some(handle)=spirc.as_ref().filter(|_| shared.active.load(Ordering::Acquire)) {
+                let ok=if !shared.active.load(Ordering::Acquire) {false}
+                else if current==Source::Navidrome {
+                    match command.action {
+                        0=>{if shared.paused.fetch_xor(true,Ordering::AcqRel) {nav.resume()}else{nav.pause()}true},
+                        1=>{nav.next();true},
+                        2=>{nav.previous();true},
+                        3|4=>{step_volume(&mixer,command.action==3);true},
+                        _=>false,
+                    }
+                }else if let Some(handle)=spirc.as_ref() {
                     match command.action {
                         0=>{let ok=handle.play_pause().is_ok();if ok {shared.paused.fetch_xor(true,Ordering::AcqRel);}ok},
                         1=>handle.next().is_ok(),
                         2=>handle.prev().is_ok(),
                         3|4=>{
-                            let old=percent(mixer.volume()) as i32;
-                            let target=(old+if command.action==3 {5}else{-5}).clamp(0,100) as u16;
-                            mixer.set_volume(from_percent(target));
+                            step_volume(&mixer,command.action==3);
                             handle.set_volume(mixer.volume()).is_ok()
                         },
                         _=>false,
@@ -551,15 +669,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     voice::Intent::Release=>{
                         if let Some(handle)=spirc.as_ref(){let _=handle.disconnect(true);}
+                        nav.stop();current=default_source;
                         shared.active.store(false,Ordering::Release);audio_guard.set_playing(false);
+                        continue;
+                    },
+                    voice::Intent::Source(chosen)=>{
+                        let temp=source_file.with_extension("new");
+                        if fs::write(&temp,format!("{}\n",chosen.name())).and_then(|_| fs::rename(&temp,&source_file)).is_ok() {
+                            default_source=chosen;
+                            if !shared.active.load(Ordering::Acquire) {current=chosen;}
+                        } else {eprintln!("receiver: could not save default source");}
+                        continue;
+                    },
+                    voice::Intent::NavidromeReload=>{
+                        navidrome_client=navidrome::Config::load(&options.state_dir)
+                            .and_then(|c| navidrome::Client::new(c).ok()).map(Arc::new);
+                        nav.configure(navidrome_client.clone());
+                        eprintln!("receiver: Navidrome settings {}",if navidrome_client.is_some(){"loaded"}else{"invalid"});
                         continue;
                     },
                     voice::Intent::Toggle=>if shared.active.load(Ordering::Acquire)&&!shared.paused.load(Ordering::Relaxed){voice::Intent::Pause}else{voice::Intent::Resume},
                     intent=>intent,
                 };
+                if let voice::Intent::Play(query,chosen)=&intent
+                    && chosen.unwrap_or(default_source)==Source::Navidrome {
+                    let Some(client)=navidrome_client.clone() else {
+                        eprintln!("voice: Navidrome is not set up; run spotiya navidrome-setup");continue;
+                    };
+                    if event.from_voice && voice::cancel_alice().await.is_err() {eprintln!("voice: could not cancel native conversation");continue;}
+                    let _=voice::pause_native().await;
+                    play_seq+=1;
+                    let (seq,query,done)=(play_seq,query.clone(),resolved_tx.clone());
+                    tokio::spawn(async move {let _=done.send((seq,client.resolve(&query).await));});
+                    voice::guard_native_pause();
+                    eprintln!("voice: Navidrome music query queued");
+                    continue;
+                }
+                if current==Source::Navidrome && matches!(intent,voice::Intent::Pause|voice::Intent::Resume|voice::Intent::Next|voice::Intent::Previous) {
+                    if event.from_voice {let _=voice::cancel_alice().await;}
+                    let _=voice::pause_native().await;
+                    match intent {
+                        voice::Intent::Pause=>nav.pause(),
+                        voice::Intent::Resume=>nav.resume(),
+                        voice::Intent::Next=>nav.next(),
+                        _=>nav.previous(),
+                    }
+                    if event.from_voice {voice::guard_native_pause();}
+                    eprintln!("voice: Navidrome transport command queued");
+                    continue;
+                }
                 let Some(handle)=spirc.as_ref() else {eprintln!("voice: Spotify is not connected yet");continue;};
                 match intent {
-                    voice::Intent::Play(query)=>{
+                    voice::Intent::Play(query,_)=>{
+                        if current==Source::Navidrome {nav.stop();current=Source::Spotify;}
                         if event.from_voice && voice::cancel_alice().await.is_err() {eprintln!("voice: could not cancel native conversation");continue;}
                         let _=voice::pause_native().await;
                         let _=handle.activate();
@@ -594,7 +756,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _=tick.tick()=>{
                 if let Ok(value)=mixer.read() {
                     let previous=shared.volume.swap(value,Ordering::AcqRel);
-                    if value!=previous && shared.active.load(Ordering::Acquire)
+                    if value!=previous && shared.active.load(Ordering::Acquire) && current==Source::Spotify
                         && let Some(handle)=spirc.as_ref() {let _=handle.set_volume(value);}
                 }
                 if player.is_invalid() {eprintln!("receiver: audio worker stopped");break;}
@@ -604,6 +766,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             shared.active.load(Ordering::Acquire) && !shared.paused.load(Ordering::Relaxed);
         audio_guard.set_playing(playing);
         info.connected = spirc.is_some();
+        info.source = current.name().to_owned();
+        info.default_source = default_source.name().to_owned();
+        info.navidrome = navidrome_client.is_some();
         info.native_guard = playing && audio_guard.healthy();
         info.position_ms = position_ms
             .saturating_add(if playing {
@@ -616,6 +781,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 0
             })
             .min(info.duration_ms);
+        if current == Source::Navidrome && shared.active.load(Ordering::Acquire) {
+            info.position_ms = nav.position_ms().min(info.duration_ms);
+        }
         publish_status(&shared, &mut info, &mut last_status);
     }
     shared.active.store(false, Ordering::Release);
@@ -623,6 +791,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     voice_watch.abort();
     audio_guard.set_playing(false);
     audio_worker.abort();
+    nav.stop();
     voice_control.abort();
     let _ = fs::remove_file(voice::CONTROL);
     stop_connection(&mut spirc, &mut task, &session, &shared).await;

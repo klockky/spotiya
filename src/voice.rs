@@ -1,3 +1,4 @@
+use crate::source::Source;
 use std::{collections::VecDeque, io, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -12,7 +13,10 @@ const MAX_FRAME: usize = 512 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Intent {
-    Play(String),
+    /// A search query, optionally for a specific source instead of the default one.
+    Play(String, Option<Source>),
+    Source(Source),
+    NavidromeReload,
     Resume,
     Pause,
     Next,
@@ -29,6 +33,26 @@ pub struct Event {
     pub from_voice: bool,
 }
 
+// "... в навидроме", "... из спотифая": the last two words pick the source.
+fn split_source(query: &str) -> (String, Option<Source>) {
+    let words: Vec<&str> = query.split_whitespace().collect();
+    if let [head @ .., preposition, name] = words.as_slice()
+        && !head.is_empty()
+        && ["в", "из", "на", "с", "со", "через"].contains(preposition)
+    {
+        let source = if name.starts_with("навидром") || name.starts_with("navidrom") {
+            Some(Source::Navidrome)
+        } else if name.starts_with("спотиф") || name.starts_with("spotif") {
+            Some(Source::Spotify)
+        } else {
+            None
+        };
+        if source.is_some() {
+            return (head.join(" "), source);
+        }
+    }
+    (query.to_owned(), None)
+}
 pub fn intent(text: &str) -> Option<Intent> {
     let text = text
         .trim()
@@ -71,6 +95,8 @@ pub fn intent(text: &str) -> Option<Intent> {
     ];
     let explicit = music_prefix.iter().find_map(|p| rest.strip_prefix(p));
     let query = explicit.unwrap_or(rest).trim().trim_matches('"').trim();
+    let (query, source) = split_source(query);
+    let query = query.as_str();
     if query.is_empty() || query.len() > 400 {
         return None;
     }
@@ -111,7 +137,7 @@ pub fn intent(text: &str) -> Option<Intent> {
     {
         return None;
     }
-    Some(Intent::Play(query.to_owned()))
+    Some(Intent::Play(query.to_owned(), source))
 }
 
 // QuasarMessage uses {252: serialized payload, 253: message type}.
@@ -341,11 +367,11 @@ mod tests {
     fn recognizes_music_and_leaves_household_commands_alone() {
         assert_eq!(
             intent("Включи radiohead"),
-            Some(Intent::Play("radiohead".into()))
+            Some(Intent::Play("radiohead".into(), None))
         );
         assert_eq!(
             intent("Включи песню Всё идёт по плану"),
-            Some(Intent::Play("все идет по плану".into()))
+            Some(Intent::Play("все идет по плану".into(), None))
         );
         assert_eq!(intent("Останови музыку"), Some(Intent::Pause));
         assert_eq!(intent("Включи музыку"), Some(Intent::Resume));
@@ -361,6 +387,37 @@ mod tests {
         ] {
             assert_eq!(intent(s), None, "{s}");
         }
+        for (phrase, query, source) in [
+            (
+                "Включи Radiohead в Навидроме",
+                "radiohead",
+                Source::Navidrome,
+            ),
+            (
+                "включи песню No Surprises из навидрома",
+                "no surprises",
+                Source::Navidrome,
+            ),
+            (
+                "Включи альбом OK Computer на Navidrome",
+                "ok computer",
+                Source::Navidrome,
+            ),
+            ("поставь Земфира в спотифае", "земфира", Source::Spotify),
+            ("запусти queen через Spotify", "queen", Source::Spotify),
+        ] {
+            assert_eq!(
+                intent(phrase),
+                Some(Intent::Play(query.into(), Some(source))),
+                "{phrase}"
+            );
+        }
+        // The source words alone, or a household device, are not music requests.
+        assert_eq!(
+            intent("включи в навидроме"),
+            Some(Intent::Play("в навидроме".into(), None))
+        );
+        assert_eq!(intent("включи свет в навидроме"), None);
         assert_eq!(context("never gonna"), "spotify:search:never+gonna");
         assert_eq!(context("a/b?c"), "spotify:search:a%2Fb%3Fc");
     }

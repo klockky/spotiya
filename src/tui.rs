@@ -69,8 +69,11 @@ fn clock(ms: u32) -> String {
     let s = ms / 1000;
     format!("{}:{:02}", s / 60, s % 60)
 }
+fn or_spotify(source: &str) -> String {
+    safe(if source.is_empty() { "spotify" } else { source })
+}
 fn lines(status: &Status, notice: &str, prompt: Option<&[u8]>, width: usize) -> Vec<String> {
-    let state = if !status.connected {
+    let state = if !status.connected && !status.navidrome {
         "CONNECTING"
     } else if !status.active {
         "READY"
@@ -81,7 +84,7 @@ fn lines(status: &Status, notice: &str, prompt: Option<&[u8]>, width: usize) -> 
     };
     let voice = if status.voice { "on" } else { "off" };
     let guard = if status.native_guard {
-        "Spotify priority"
+        "Music priority"
     } else {
         "idle"
     };
@@ -113,6 +116,16 @@ fn lines(status: &Status, notice: &str, prompt: Option<&[u8]>, width: usize) -> 
                 "off"
             }
         ),
+        format!(
+            "Source: {}   Search: {}   Navidrome: {}",
+            or_spotify(&status.source),
+            or_spotify(&status.default_source),
+            if status.navidrome {
+                "set up"
+            } else {
+                "not set up"
+            }
+        ),
         String::new(),
         safe(if status.title.is_empty() {
             "No track selected"
@@ -130,14 +143,15 @@ fn lines(status: &Status, notice: &str, prompt: Option<&[u8]>, width: usize) -> 
         ),
         String::new(),
         "Space pause/play   n next   p previous   +/- volume".into(),
-        "/ search   l login   v voice   e spectrum on/off".into(),
-        "x release to Alice   q quit".into(),
+        "/ search   s search source   l Spotify login   v voice".into(),
+        "e spectrum on/off   x release to Alice   q quit".into(),
         String::new(),
     ];
     out.extend(notice.lines().map(safe));
     if let Some(input) = prompt {
         out.push(format!(
-            "Search: {}_",
+            "Search {}: {}_",
+            or_spotify(&status.default_source),
             safe(&String::from_utf8_lossy(input))
         ));
     }
@@ -175,7 +189,8 @@ pub fn run() -> io::Result<()> {
     use std::io::BufRead;
     let _terminal = Terminal::enter()?;
     let mut status = Status::default();
-    let mut notice = "Ready. / searches Spotify; l pairs an account.".to_owned();
+    let mut notice =
+        "Ready. / searches the chosen source; s switches Spotify/Navidrome.".to_owned();
     let mut prompt: Option<Vec<u8>> = None;
     let (updates, rx) = mpsc::channel::<String>();
     let mut login_socket: Option<std::os::unix::net::UnixStream> = None;
@@ -222,7 +237,9 @@ pub fn run() -> io::Result<()> {
                             "Search cancelled".into()
                         } else {
                             match control::request(&format!("PLAY {}", query.trim())) {
-                                Ok(_) => "Spotify search queued".into(),
+                                Ok(_) => {
+                                    format!("{} search queued", or_spotify(&status.default_source))
+                                }
                                 Err(e) => e.to_string(),
                             }
                         };
@@ -258,6 +275,19 @@ pub fn run() -> io::Result<()> {
                     }
                 }
                 b'x' => Some("RELEASE".to_owned()),
+                b's' => {
+                    if or_spotify(&status.default_source) == "spotify" {
+                        if status.navidrome {
+                            Some("SOURCE NAVIDROME".to_owned())
+                        } else {
+                            notice =
+                                "Navidrome is not set up: spotiya navidrome-setup URL USER".into();
+                            None
+                        }
+                    } else {
+                        Some("SOURCE SPOTIFY".to_owned())
+                    }
+                }
                 b'/' => {
                     prompt = Some(Vec::new());
                     None
@@ -326,6 +356,28 @@ mod tests {
             assert!(frame.iter().any(|s| s == &format!("Spectrum: {label}")));
             assert!(frame.iter().any(|s| s.contains("e spectrum on/off")));
         }
+    }
+    #[test]
+    fn sources_are_shown_with_spotify_as_the_default_for_older_status_files() {
+        let mut status = Status::default();
+        let frame = lines(&status, "", Some(b"x"), 80);
+        assert!(
+            frame
+                .iter()
+                .any(|s| s == "Source: spotify   Search: spotify   Navidrome: not set up")
+        );
+        assert!(frame.iter().any(|s| s == "Search spotify: x_"));
+        assert!(lines(&status, "", None, 80)[2].ends_with("|   CONNECTING"));
+        status.navidrome = true;
+        status.source = "navidrome\x1b[2J".into();
+        status.default_source = "navidrome".into();
+        let frame = lines(&status, "", None, 80);
+        assert!(
+            frame
+                .iter()
+                .any(|s| s == "Source: navidrome[2J   Search: navidrome   Navidrome: set up")
+        );
+        assert!(frame.iter().any(|s| s.contains("|   READY")));
     }
     #[test]
     fn metadata_cannot_inject_terminal_controls_and_empty_progress_is_safe() {

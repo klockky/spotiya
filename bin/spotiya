@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """spotiya: launch the receiver terminal tools over ADB."""
 import argparse
+import getpass
 import json
 import os
 from pathlib import Path
@@ -43,14 +44,23 @@ def main():
     parser = argparse.ArgumentParser(description="spotiya: terminal controls over ADB")
     parser.add_argument("--device", default=configured_device(), help="ADB serial/IP; otherwise configured or only connected device")
     parser.add_argument("command", nargs="?", default="tui", choices=(
-        "tui", "login", "status", "play", "pause", "resume", "toggle", "next",
-        "previous", "volume", "voice", "spectrum", "release", "start", "stop", "restart", "version"))
+        "tui", "login", "status", "play", "navidrome", "spotify", "source", "navidrome-setup",
+        "pause", "resume", "toggle", "next", "previous", "volume", "voice", "spectrum",
+        "release", "start", "stop", "restart", "version"))
     parser.add_argument("value", nargs="*")
     args = parser.parse_args()
-    if args.command == "play":
+    if args.command in ("play", "navidrome", "spotify"):
         if not args.value:
-            parser.error("play needs a song or artist")
+            parser.error(args.command + " needs a song or artist")
         value = [" ".join(args.value)]
+    elif args.command == "source":
+        if args.value not in (["spotify"], ["navidrome"]):
+            parser.error("source needs spotify or navidrome")
+        value = args.value
+    elif args.command == "navidrome-setup":
+        if len(args.value) != 2:
+            parser.error("navidrome-setup needs URL and USER; the password is asked for or read from stdin")
+        value = args.value
     elif args.command in ("volume", "voice", "spectrum"):
         if len(args.value) != 1:
             parser.error(args.command + " needs one value")
@@ -72,6 +82,10 @@ def main():
     if args.command == "tui":
         columns, rows = shutil.get_terminal_size(fallback=(80, 24))
         remote = f"stty rows {rows} cols {columns}; exec " + remote
+    if args.command == "navidrome-setup":
+        # The password never goes on a command line: it travels over adb's stdin.
+        password = getpass.getpass("Navidrome password: ") if sys.stdin.isatty() else sys.stdin.readline().rstrip("\r\n")
+        return subprocess.run(adb + ["shell", remote], input=password + "\n", text=True).returncode
     flags = ["-t"] if args.command == "tui" else []
     if args.command == "tui":
         saved = termios.tcgetattr(sys.stdin)
