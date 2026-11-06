@@ -2,6 +2,16 @@
 set -eu
 SPOTIYA_BASE=/data/opt/spotify-connect
 case "${1:-tui}" in
+    backend)
+        shift
+        [ "$#" -eq 1 ] || { echo 'Usage: spotiya backend soloist|librespot' >&2; exit 1; }
+        set -- --backend-select "$1"
+        ;;
+    soloist)
+        shift
+        [ "$#" -eq 1 ] && [ "$1" = key ] || { echo 'Usage: spotiya soloist key < PRIVATE_KEY_FILE' >&2; exit 1; }
+        set -- --soloist-key
+        ;;
     uninstall)
         shift
         if [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --yes ]; }; then

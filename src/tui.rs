@@ -140,6 +140,10 @@ fn state(status: &Status) -> (&'static str, Rgb) {
         ("PREMIUM REQUIRED", screen::ERROR)
     } else if !status.login_refused.is_empty() {
         ("LOGIN REQUIRED", screen::ERROR)
+    } else if status.spotify_backend == "soloist" && !status.backend_error.is_empty() {
+        ("SOLOIST ERROR", screen::ERROR)
+    } else if status.spotify_backend == "soloist" && !status.connected {
+        ("PAIR IN SPOTIFY", screen::DIM)
     } else if !status.connected {
         ("CONNECTING", screen::INFO)
     } else if !status.error.is_empty() {
@@ -334,11 +338,15 @@ fn dashboard(
         label,
         Style::bold(colour),
     );
-    let place = [status.name.as_str(), status.profile.as_str()]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ");
+    let place = [
+        status.name.as_str(),
+        status.profile.as_str(),
+        status.spotify_backend.as_str(),
+    ]
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
     if !place.is_empty() {
         let room = inner.w.saturating_sub(x - inner.x);
         c.text(
@@ -869,7 +877,7 @@ impl AddonMenu {
             let label = if installing == Some(addon.id) {
                 "Installing"
             } else {
-                (addon.state)(status).label(addon.command.is_none())
+                (addon.state)(status).label(addon.command.is_none() && addon.id != "soloist")
             };
             out.push(format!(
                 "{} {}   [{}]",
@@ -886,6 +894,9 @@ impl AddonMenu {
             out.push("Installation in progress. c: cancel download".into());
         } else if self.confirm_remove {
             out.push(format!("Press x again to remove {}", addon.name));
+        } else if state.installed && addon.id == "soloist" {
+            out.push("Set key: /data/opt/solo/set-key.sh; then spotiya retry".into());
+            out.push("Select backend: spotiya backend soloist; spotiya restart".into());
         } else if state.installed && addon.command.is_none() {
             out.push(
                 "Ready; used automatically when ordinary Spotify audio keys are refused.".into(),
@@ -1111,6 +1122,7 @@ fn session(state_dir: &Path, show_addons: bool) -> io::Result<()> {
                             addon_notice = "An add-on installation is already running".into();
                         } else if (addon.state)(&status).installed {
                             addon_notice = match addon.command {
+                                None if addon.id == "soloist" => "Set key: /data/opt/solo/set-key.sh; select soloist backend, then restart".into(),
                                 None => {
                                     format!("{} ready; used automatically when needed", addon.name)
                                 }
@@ -1377,6 +1389,44 @@ mod tests {
         assert!(!frame.iter().any(|s| s.contains("Enter: disable PlayPlay")));
         assert!(matches!(menu.key(b'c'), Some(AddonAction::StopInstall)));
         assert!(matches!(menu.key(b'q'), Some(AddonAction::Cancel)));
+    }
+    #[test]
+    fn soloist_addon_shows_install_update_and_personal_key_instructions() {
+        let menu = AddonMenu {
+            selected: crate::addons::CATALOG
+                .iter()
+                .position(|a| a.id == "soloist")
+                .unwrap(),
+            ..Default::default()
+        };
+        let mut status = Status::default();
+        let frame = menu.lines(&status, 30, None, "");
+        assert!(frame.iter().any(|s| s == "Enter: download Spotify Soloist"));
+        assert!(
+            frame
+                .iter()
+                .any(|s| s.contains("Official client from Spotify"))
+        );
+        status.soloist_available = true;
+        status.spotify_backend = "soloist".into();
+        status.connected = true;
+        let frame = menu.lines(&status, 30, None, "");
+        assert!(
+            frame
+                .iter()
+                .any(|s| s.contains("Spotify Soloist   [Running]"))
+        );
+        assert!(
+            frame
+                .iter()
+                .any(|s| s.contains("/data/opt/solo/set-key.sh"))
+        );
+        assert!(frame.iter().any(|s| s == "u: update   x: remove"));
+        assert!(
+            !frame
+                .iter()
+                .any(|s| s.contains("ordinary Spotify audio keys"))
+        );
     }
     #[test]
     fn profile_menu_navigation_scrolls_and_cancel_does_not_save() {

@@ -2620,6 +2620,7 @@ dependencies = [
  "sha2",
  "tar",
  "tokio",
+ "tokio-tungstenite",
  "uuid",
 ]
 

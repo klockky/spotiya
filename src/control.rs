@@ -22,6 +22,9 @@ pub const STATUS: &str = "/run/spotiya.status";
 #[serde(default)]
 pub struct Status {
     pub active: bool,
+    pub spotify_backend: String,
+    pub backend_error: String,
+    pub soloist_available: bool,
     pub playplay_available: bool,
     pub airplay_available: bool,
     pub airplay_enabled: bool,
@@ -94,7 +97,7 @@ pub fn parse(line: &str) -> Option<Intent> {
 pub async fn serve(
     sender: mpsc::Sender<Event>,
     logins: mpsc::Sender<auth::Login>,
-    config: SessionConfig,
+    config: Option<SessionConfig>,
     capabilities: crate::profiles::Capabilities,
     airplay: mpsc::Sender<crate::airplay::Request>,
     youtube: mpsc::Sender<crate::youtube::Request>,
@@ -141,6 +144,10 @@ pub async fn serve(
             }
             let mut socket = reader.into_inner().into_inner();
             if line.trim() == "LOGIN" {
+                let Some(config) = config else {
+                    let _=socket.write_all(b"ERROR Soloist uses its own API key and Spotify Connect pairing; use spotiya soloist key, then select the device in Spotify\n").await;
+                    return;
+                };
                 let (r, w) = socket.into_split();
                 auth::serve(r, w, login_lock, config, logins).await;
                 return;
@@ -208,6 +215,7 @@ pub async fn serve(
                 {
                     "ERROR Install the optional YouTube package first\n".into()
                 } else if matches!(intent, Intent::Retry)
+                    && status.spotify_backend != "soloist"
                     && (!status.retry_required || status.retry_after_secs > 0)
                 {
                     format!(

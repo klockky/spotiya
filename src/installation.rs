@@ -651,6 +651,7 @@ fn uninstall_files(
         remove_path(path)
             .map_err(|e| error(format!("Could not remove {}: {e}", path.display())))?;
     }
+    crate::soloist_install::uninstall_owned(&layout.base)?;
     remove_path(&layout.base)
         .map_err(|e| error(format!("Could not remove {}: {e}", layout.base.display())))
 }
@@ -688,6 +689,7 @@ pub fn uninstall(assume_yes: bool) -> io::Result<()> {
         "/run/spotiya-airplay",
         "/run/spotiya-youtube.control",
         "/run/spotiya-youtube.levels",
+        "/run/spotiya-soloist-levels",
         "/run/spotify-connect-stop",
     ]
     .into_iter()
@@ -698,6 +700,7 @@ pub fn uninstall(assume_yes: bool) -> io::Result<()> {
         "/tmp/spotify-connect-supervisor.log",
         "/tmp/spotiya-airplay.log",
         "/tmp/spotiya-youtube.log",
+        "/tmp/spotiya-soloist.log",
     ] {
         runtime.push(log.into());
         runtime.push(format!("{log}.1").into());

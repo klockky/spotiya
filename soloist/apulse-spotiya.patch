@@ -1,0 +1,141 @@
+--- a/src/apulse.h
++++ b/src/apulse.h
+@@ -92,6 +92,7 @@
+ };
+ 
+ struct pa_stream {
++    struct spotiya_spectrum *spotiya_spectrum;
+     pa_context *c;
+     pa_stream_state_t state;
+     pa_stream_direction_t direction;
+--- a/src/apulse-stream.c
++++ b/src/apulse-stream.c
+@@ -25,6 +25,7 @@
+ #include "apulse.h"
+ #include "trace.h"
+ #include "util.h"
++#include "apulse-spectrum.h"
+ 
+ #define MAKE_SND_LIB_VERSION(a, b, c) (((a) << 16) | ((b) << 8) | (c))
+ 
+@@ -172,6 +173,7 @@
+ 
+     if (events & PA_IO_EVENT_OUTPUT) {
+         if (paused) {
++            spotiya_spectrum_reset(s->spotiya_spectrum);
+             // client stream is corked. Pass silence to ALSA
+             size_t bytecnt = MIN(buf_size, frame_count * frame_size);
+             memset(buf, 0, bytecnt);
+@@ -187,14 +189,19 @@
+             size_t bytecnt = MIN(buf_size, frame_count * frame_size);
+             bytecnt = ringbuffer_read(s->rb, buf, bytecnt);
+ 
+-            pa_apply_volume_multiplier(buf, bytecnt, s->volume, &s->ss);
++            const char *hardware_volume = getenv("SPOTIYA_SOLOIST_HARDWARE_VOLUME");
++            if (!hardware_volume || strcmp(hardware_volume, "1") != 0)
++                pa_apply_volume_multiplier(buf, bytecnt, s->volume, &s->ss);
+ 
+             if (bytecnt == 0) {
+                 // application is not ready yet, play silence
+                 bytecnt = MIN(buf_size, frame_count * frame_size);
+                 memset(buf, 0, bytecnt);
+             }
+-            snd_pcm_writei(s->ph, buf, bytecnt / frame_size);
++            snd_pcm_sframes_t written = snd_pcm_writei(s->ph, buf, bytecnt / frame_size);
++            if (written > 0 && (s->ss.format == PA_SAMPLE_FLOAT32LE || s->ss.format == PA_SAMPLE_S16LE))
++                spotiya_spectrum_feed(s->spotiya_spectrum, buf, written,
++                    s->ss.format == PA_SAMPLE_FLOAT32LE ? SPOTIYA_FLOAT32 : SPOTIYA_S16);
+         }
+     }
+ 
+@@ -878,10 +885,11 @@
+     g_free(s_map);
+ 
+     pa_stream *s = calloc(1, sizeof(pa_stream));
+-    s->c = c;
++    s->c = pa_context_ref(c);
+     s->ref_cnt = 1;
+     s->state = PA_STREAM_UNCONNECTED;
+     s->ss = *ss;
++    s->spotiya_spectrum = spotiya_spectrum_new(ss->rate, ss->channels);
+ 
+     s->idx = c->next_stream_idx++;
+     g_hash_table_insert(c->streams_ht, GINT_TO_POINTER(s->idx), s);
+@@ -1020,6 +1028,8 @@
+     s->ref_cnt--;
+     if (s->ref_cnt == 0) {
+         g_hash_table_remove(s->c->streams_ht, GINT_TO_POINTER(s->idx));
++        pa_context_unref(s->c);
++        spotiya_spectrum_free(s->spotiya_spectrum);
+         ringbuffer_free(s->rb);
+         free(s->peek_buffer);
+         free(s->write_buffer);
+--- a/src/apulse-operation.c
++++ b/src/apulse-operation.c
+@@ -29,7 +29,10 @@
+ deh_perform_operation(pa_mainloop_api *api, pa_defer_event *de, void *userdata)
+ {
+     pa_operation *op = userdata;
+-    op->handler(op);
++    if (op->state != PA_OPERATION_CANCELLED)
++        op->handler(op);
++    else
++        pa_operation_unref(op);
+ }
+ 
+ pa_operation *
+@@ -47,6 +50,10 @@
+ void
+ pa_operation_launch(pa_operation *op)
+ {
++    if (op->c)
++        pa_context_ref(op->c);
++    if (op->s)
++        pa_stream_ref(op->s);
+     pa_mainloop_api *api = op->api;
+     api->defer_new(api, deh_perform_operation, pa_operation_ref(op));
+ }
+@@ -62,7 +69,8 @@
+ void
+ pa_operation_cancel(pa_operation *o)
+ {
+-    trace_info_z("Z %s o=%p\n", __func__, o);
++    if (o && o->state == PA_OPERATION_RUNNING)
++        o->state = PA_OPERATION_CANCELLED;
+ }
+ 
+ APULSE_EXPORT
+@@ -98,8 +106,13 @@
+     if (!o)
+         return;
+     o->ref_cnt--;
+-    if (o->ref_cnt == 0)
++    if (o->ref_cnt == 0) {
++        if (o->s)
++            pa_stream_unref(o->s);
++        if (o->c)
++            pa_context_unref(o->c);
+         g_slice_free(pa_operation, o);
++    }
+ }
+ 
+ APULSE_EXPORT
+--- a/src/apulse-context.c
++++ b/src/apulse-context.c
+@@ -454,7 +454,7 @@
+     pa_stream *s = g_hash_table_lookup(op->c->streams_ht, GINT_TO_POINTER(idx));
+     if (!s) {
+         trace_error("%s, no such stream: %u\n", __func__, idx);
+-        pa_operation_cancel(op);
++        pa_operation_done(op);
+         return;
+     }
+ 
+@@ -604,6 +604,7 @@
+         if (op->context_success_cb)
+             op->context_success_cb(op->c, 0, op->cb_userdata);
+ 
++        pa_operation_done(op);
+         return;
+     }
+ 

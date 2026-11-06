@@ -3,8 +3,58 @@
 [![Build and test](https://github.com/klockky/spotiya/actions/workflows/ci.yml/badge.svg)](https://github.com/klockky/spotiya/actions/workflows/ci.yml)
 
 Spotify Connect для Яндекс Станций: музыка, голосовое управление и TUI в одном
-бинарнике на Rust. Воспроизведение и подключение к Spotify обеспечивает
+бинарнике на Rust. В рабочей версии добавлен выбор Spotify backend:
+официальный [Spotify Soloist](https://github.com/spotify/soloist) или
 [librespot](https://github.com/librespot-org/librespot/tree/v0.8.0).
+
+> [!IMPORTANT]
+> Интеграция Soloist экспериментальная; проверена на Мини 2.
+> В новой сборке backend по умолчанию — Soloist. Его исполняемый файл и личный
+> API key устанавливаются отдельно. Автоматического перехода на librespot/PlayPlay нет.
+> На Мини 2 проверены подключение, звук, пауза и повторное подключение через
+> Spotify Connect. Передача звука между дополнениями ещё требует проверки.
+
+### Soloist в сборке из исходников
+
+```sh
+spotiya addon install soloist
+/data/opt/solo/set-key.sh
+spotiya backend soloist
+spotiya restart
+```
+
+В TUI откройте `a` (дополнения), выберите **Spotify Soloist** и нажмите Enter.
+Команда установки и TUI скачивают пакет совместимости из GitHub Releases для
+текущей версии Spotiya, а сам официальный клиент — напрямую с
+`soloist-builds.spotifycdn.com`. Для обновления: `u` в списке дополнений или повторно
+`spotiya addon install soloist`, затем `spotiya retry`. Ключ и данные входа сохраняются.
+Новая версия сначала проверяется; при нехватке места/ошибке загрузки старая остаётся.
+Для каждой версии Spotiya нужен пакет совместимости из того же релиза.
+
+Ключ создаётся в [Spotify for Developers](https://developer.spotify.com/dashboard/soloist)
+действующим Premium-аккаунтом. Скрипт скрывает ввод и сохраняет ключ с правами `0600`;
+не передавайте ключ в чат или аргумент команды Spotiya. Для записи из приватного файла:
+`spotiya soloist key < /path/to/private-key-file`.
+После запуска выберите колонку в Spotify Connect. `spotiya login` с кодом относится
+только к librespot; Soloist использует собственное подключение из приложения Spotify.
+После замены ключа можно выполнить `spotiya retry`.
+
+В статусе и TUI указан выбранный backend; ошибки Soloist выводятся без повторного
+входа через librespot. Кнопки и команды паузы, продолжения, смены трека и громкости
+передаются в локальный WebSocket API Soloist. `spotiya play spotify:track:…` принимает
+также URI альбома, плейлиста и эпизода. Текстовый/голосовой поиск пока недоступен:
+он не описан в официальном API. Спектр Soloist работает с нашим apulse: четыре уровня частотных полос
+передаются в Spotiya без передачи аудио; включение и выключение доступны в TUI. AirPlay/YouTube используют прежние службы, но совместный
+аудиовывод с Soloist пока не проверен на музыке.
+
+Для явного возврата к прежнему движку: `spotiya backend librespot`, затем
+`spotiya restart`. Сохранённый вход librespot используется только в этом режиме.
+Выбор хранится в `receiver-state/spotify-backend`, данные и ключ Soloist — отдельно
+в `receiver-state/soloist`. Файл `soloist/launcher` в этом каталоге может задавать
+абсолютный путь к launcher; по умолчанию используется `/data/opt/solo/run.sh`.
+
+Подготовка runtime для старой glibc описана в [soloist/README.md](soloist/README.md).
+Официальный Soloist не включается в архивы Spotiya и не загружается в наши GitHub Releases.
 
 > [!CAUTION]
 > **Использование дополнения PlayPlay — на ваш страх и риск. Возможна блокировка аккаунта Spotify.**

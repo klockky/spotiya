@@ -30,6 +30,20 @@ impl Default for Playback {
     }
 }
 impl Playback {
+    pub fn soloist(&mut self, state: &crate::soloist::State) {
+        self.phase = if !state.connected || !state.active {
+            Phase::Idle
+        } else {
+            match state.status.as_str() {
+                "playing" => Phase::Playing,
+                "paused" => Phase::Paused,
+                "buffering" => Phase::Loading,
+                _ => Phase::Idle,
+            }
+        };
+        self.position = state.position();
+        self.at = Instant::now();
+    }
     pub fn reset(&mut self) {
         *self = Self::default();
     }

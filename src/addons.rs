@@ -114,6 +114,29 @@ pub static CATALOG: &[Addon] = &[
             error: &s.youtube_error,
         },
     },
+    Addon {
+        id: "soloist",
+        name: "Spotify Soloist",
+        description: "Official client from Spotify; compatibility runtime from GitHub. Personal API key required.",
+        asset: crate::soloist_install::ASSET,
+        sums: crate::soloist_install::SUMS,
+        root: "spotiya-soloist-compat",
+        directory: "soloist",
+        bins: &[],
+        setting: None,
+        legacy: None,
+        command: None,
+        state: |s| State {
+            installed: s.soloist_available,
+            enabled: s.spotify_backend == "soloist",
+            running: s.spotify_backend == "soloist" && s.connected,
+            error: if s.spotify_backend == "soloist" {
+                &s.backend_error
+            } else {
+                ""
+            },
+        },
+    },
 ];
 pub fn find(id: &str) -> io::Result<&'static Addon> {
     CATALOG
@@ -286,6 +309,13 @@ pub enum Outcome {
 }
 impl Outcome {
     pub fn message(&self, addon: &Addon) -> String {
+        if addon.id == "soloist" {
+            return match self {
+                Outcome::Current => "Soloist is already up to date".into(),
+                Outcome::Installed => "Soloist installed.\nKey: /data/opt/solo/set-key.sh\nUse: spotiya backend soloist; spotiya restart".into(),
+                Outcome::Updated => "Soloist updated; run spotiya retry (restart after switching backend)".into(),
+            };
+        }
         match self {
             Outcome::Installed if addon.command.is_none() => {
                 format!("{} installed; ready on demand", addon.name)
@@ -376,6 +406,9 @@ fn install_verified(
     })
 }
 pub fn remove(id: &str, base: &Path) -> io::Result<()> {
+    if id == "soloist" {
+        return crate::soloist_install::remove(base);
+    }
     let addon = find(id)?;
     let _lock = crate::file_lock(&base.join("receiver-state"), "install.lock")
         .map_err(|_| error("Another installation is running"))?;
@@ -409,6 +442,17 @@ pub fn local(id: &str, base: &Path, archive: &Path, sums: &Path) -> io::Result<O
     let stage = Temporary::new(Path::new("/tmp"), "addon-download")?;
     let copy = stage.0.join(addon.asset);
     update::copy_limited(archive, &copy, MAX_ARCHIVE)?;
+    if id == "soloist" {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(crate::soloist_install::install(
+                base,
+                &copy,
+                &update::limited_file(sums, 65536)?,
+                |s| println!("{s}"),
+            ));
+    }
     install_verified(
         addon,
         base,
@@ -485,6 +529,15 @@ pub async fn remote(
     .await?;
     if fs::metadata(&path)?.len() != archive.size {
         return Err(error("Downloaded add-on size does not match release"));
+    }
+    if id == "soloist" {
+        return crate::soloist_install::install(
+            base,
+            &path,
+            &update::limited_file(&sums, 65536)?,
+            progress,
+        )
+        .await;
     }
     progress("Verifying and installing add-on...".into());
     install_verified(

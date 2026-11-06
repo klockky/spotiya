@@ -1,7 +1,7 @@
 use alsa::mixer::SelemId;
 use futures_util::StreamExt;
 use librespot::{
-    connect::{ConnectConfig, LoadRequest, LoadRequestOptions, Spirc},
+    connect::{ConnectConfig, Spirc},
     core::{
         Error,
         cache::Cache,
@@ -49,8 +49,12 @@ mod profile_selection;
 mod profiles;
 mod recovery;
 mod screen;
+mod soloist;
+mod soloist_install;
 mod spectrum;
+mod spotify_backend;
 mod supervisor;
+use spotify_backend::{Backend, Handle};
 mod tui;
 mod update;
 mod voice;
@@ -264,6 +268,7 @@ struct Options {
     voice: bool,
     supervise: bool,
     profile: Option<String>,
+    backend: Option<Backend>,
 }
 fn options() -> Result<Option<Options>, String> {
     let mut result = Options {
@@ -273,6 +278,7 @@ fn options() -> Result<Option<Options>, String> {
         voice: true,
         supervise: false,
         profile: None,
+        backend: None,
     };
     let mut args = std::env::args().skip(1);
     let mut profile_info = false;
@@ -293,6 +299,27 @@ fn options() -> Result<Option<Options>, String> {
     let mut addon_remove = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--backend" => {
+                result.backend = Some(
+                    Backend::parse(&args.next().ok_or("missing backend")?)
+                        .map_err(|e| e.to_string())?,
+                )
+            }
+            "--backend-select" => {
+                let backend = Backend::parse(&args.next().ok_or("missing backend")?)
+                    .map_err(|e| e.to_string())?;
+                backend.save(&result.state_dir).map_err(|e| e.to_string())?;
+                println!(
+                    "Spotify backend: {}; restart Spotiya to apply",
+                    backend.name()
+                );
+                return Ok(None);
+            }
+            "--soloist-key" => {
+                soloist::save_key(&result.state_dir).map_err(|e| e.to_string())?;
+                println!("Soloist key saved; restart Spotiya to apply");
+                return Ok(None);
+            }
             "--addon-install" => addon_install = Some(args.next().ok_or("missing add-on id")?),
             "--addon-remove" => addon_remove = Some(args.next().ok_or("missing add-on id")?),
             "--addon-install-file" => {
@@ -423,7 +450,10 @@ fn options() -> Result<Option<Options>, String> {
                 return Ok(None);
             }
             "--version" => {
-                println!("spotiya {} (librespot 0.8.0)", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "spotiya {} (Soloist / librespot 0.8.0)",
+                    env!("CARGO_PKG_VERSION")
+                );
                 return Ok(None);
             }
             "--status" => {
@@ -435,7 +465,7 @@ fn options() -> Result<Option<Options>, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "spotiya [--state-dir PATH] [--name NAME] [--profile auto|mini1|mini2|generic|FILE] [--no-buttons] [--no-voice]\nspotiya --profiles | --profile-info | --profile-select ID_OR_JSON\nspotiya --tui | --addons | --login | --status | --version\nspotiya --doctor | --doctor-report PATH\nspotiya --update | --update-check | --update-tag VERSION\nspotiya --uninstall [--yes]\nspotiya --update-file ARCHIVE SHA256SUMS\nspotiya --addon-install ID | --addon-install-file ID ARCHIVE SHA256SUMS | --addon-remove ID\nspotiya --play QUERY | --resume | --pause | --toggle | --next | --previous\nspotiya --volume 0..100 | --voice on/off | --spectrum on/off | --airplay on/off | --youtube on/off | --release | --retry\nspotiya --youtube-url LINK"
+                    "spotiya [--state-dir PATH] [--name NAME] [--profile auto|mini1|mini2|generic|FILE] [--no-buttons] [--no-voice]\nspotiya --backend soloist|librespot | --backend-select soloist|librespot\nspotiya --soloist-key < PRIVATE_KEY_FILE\nspotiya --profiles | --profile-info | --profile-select ID_OR_JSON\nspotiya --tui | --addons | --login | --status | --version\nspotiya --doctor | --doctor-report PATH\nspotiya --update | --update-check | --update-tag VERSION\nspotiya --uninstall [--yes]\nspotiya --update-file ARCHIVE SHA256SUMS\nspotiya --addon-install ID | --addon-install-file ID ARCHIVE SHA256SUMS | --addon-remove ID\nspotiya --play QUERY | --resume | --pause | --toggle | --next | --previous\nspotiya --volume 0..100 | --voice on/off | --spectrum on/off | --airplay on/off | --youtube on/off | --release | --retry\nspotiya --youtube-url LINK"
                 );
                 return Ok(None);
             }
@@ -642,7 +672,9 @@ fn publish_status(
     if info.login_refused != refused {
         info.login_refused = refused.into();
     }
-    info.error = if failures.blocked() {
+    info.error = if !info.backend_error.is_empty() {
+        info.backend_error.clone()
+    } else if failures.blocked() {
         failures.message()
     } else if let Some(rejected) = login {
         rejected.status().to_owned()
@@ -681,7 +713,7 @@ fn publish_status(
     }
 }
 async fn stop_connection(
-    spirc: &mut Option<Spirc>,
+    spirc: &mut Option<Handle>,
     task: &mut Option<JoinHandle<()>>,
     session: &Session,
     shared: &Shared,
@@ -749,6 +781,11 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         supervisor::run(&options).await?;
         return Ok(());
     }
+    let backend_kind = options
+        .backend
+        .map(Ok)
+        .unwrap_or_else(|| Backend::read(&options.state_dir))?;
+    let is_soloist = backend_kind == Backend::Soloist;
     let _lock = file_lock(&options.state_dir, "receiver.lock")?;
     logging::init()?;
     let resolved = resolved_profile(&options)?;
@@ -782,14 +819,20 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     }
     config.tmp_dir = "/tmp/spotiya".into();
     fs::create_dir_all(&config.tmp_dir)?;
-    let mut discovery = librespot::discovery::Discovery::builder(
-        config.device_id.clone(),
-        config.client_id.clone(),
-    )
-    .name(options.name.clone())
-    .device_type(DeviceType::Speaker)
-    .port(10337)
-    .launch()?;
+    let mut discovery = if is_soloist {
+        None
+    } else {
+        Some(
+            librespot::discovery::Discovery::builder(
+                config.device_id.clone(),
+                config.client_id.clone(),
+            )
+            .name(options.name.clone())
+            .device_type(DeviceType::Speaker)
+            .port(10337)
+            .launch()?,
+        )
+    };
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     let shared = Arc::new(Shared {
         running: AtomicBool::new(true),
@@ -853,7 +896,11 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         ))
     });
     let (login_tx, mut login_rx) = mpsc::channel::<auth::Login>(1);
-    let control_config = config.clone();
+    let control_config = if is_soloist {
+        None
+    } else {
+        Some(config.clone())
+    };
     let (airplay_tx, mut airplay_rx) = mpsc::channel::<airplay::Request>(8);
     let (youtube_tx, mut youtube_rx) = mpsc::channel::<youtube::Request>(8);
     let control_spectrum = shared.spectrum.clone();
@@ -909,12 +956,16 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let mut credentials = cache.credentials();
+    let mut credentials = if is_soloist {
+        None
+    } else {
+        cache.credentials()
+    };
     // Credentials that worked before a pending login, restored if the new account cannot connect.
     let mut fallback = None;
     // Set when Spotify refused the saved login; retries wait for new credentials.
     let mut rejected = None::<Rejected>;
-    let mut spirc: Option<Spirc> = None;
+    let mut spirc: Option<Handle> = None;
     let mut task: Option<JoinHandle<()>> = None;
     let mut connecting: Option<Connecting> = None;
     let mut retry_at = Instant::now();
@@ -927,6 +978,7 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let mut status_buffer = Vec::new();
     let mut info = control::Status {
         name: options.name.clone(),
+        spotify_backend: backend_kind.name().into(),
         voice: voice_enabled,
         voice_supported: caps.voice,
         profile: profile.id.clone(),
@@ -949,7 +1001,7 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| io::Error::other("No install directory"))?
         .to_path_buf();
     let playplay = playplay::resolver(base.clone());
-    info.playplay_available = playplay::available(&base);
+    info.playplay_available = !is_soloist && playplay::available(&base);
     if info.playplay_available {
         eprintln!("receiver: PlayPlay fallback available (lazy)");
     }
@@ -964,6 +1016,24 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         youtube::Runtime::new(&base, &options.state_dir, &options.name, &profile.audio);
     youtube.poll(&shared.airplay).await;
     youtube.status(&mut info, &shared.airplay);
+    if is_soloist {
+        soloist::receive_levels(shared.airplay.clone(), shared.spectrum.clone())?;
+    }
+    let (mut soloist_task, mut soloist_state) = if is_soloist {
+        let (handle, task, state) = soloist::spawn(
+            base.clone(),
+            options.state_dir.clone(),
+            options.name.clone(),
+            shared.airplay.clone(),
+        );
+        spirc = Some(Handle::Soloist(handle));
+        (Some(task), Some(state))
+    } else {
+        (None, None)
+    };
+    let mut soloist_volume_revision = 0;
+    let mut soloist_error = String::new();
+    let mut soloist_connected = false;
     let mut playback = playback::Playback::default();
     let mut failures = recovery::Failures::default();
     let mut retry_track = None::<String>;
@@ -985,7 +1055,30 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             _=terminate.recv()=>break,
             _=tokio::signal::ctrl_c()=>break,
-            fresh=discovery.next()=>{
+            changed=async {match soloist_state.as_mut() {Some(state)=>state.changed().await,None=>std::future::pending().await}}, if soloist_state.is_some()=>{
+                if let Some(state)=soloist_state.as_ref() {
+                    let state=state.borrow().clone();
+                    soloist_error=state.error.clone();soloist_connected=state.connected;
+                    playback.soloist(&state);
+                    if !shared.airplay.active.load(Ordering::Acquire) {
+                        info.title=state.title.clone();info.artist=state.artist.clone();info.album=state.album.clone();info.duration_ms=state.duration_ms;
+                    }
+                    if state.volume_revision!=soloist_volume_revision {
+                        soloist_volume_revision=state.volume_revision;
+                        if let Some(volume)=state.volume {mixer.set_master_volume(from_percent(volume));}
+                    }
+                    if state.playing() {
+                        if shared.airplay.holds_youtube() {let _=youtube.send("STOP");}
+                        else if shared.airplay.active.load(Ordering::Acquire) {airplay.stop(&shared.airplay).await;}
+                        if let Some(uri)=voice::playable_track(&state.uri) && last_track.as_ref()!=Some(&uri) {
+                            let temp=last_track_file.with_extension("new");
+                            if fs::write(&temp,&uri).and_then(|_|fs::rename(&temp,&last_track_file)).is_ok(){last_track=Some(uri);}
+                        }
+                    }
+                }
+                if changed.is_err() {soloist_state=None;}
+            },
+            fresh=async {match discovery.as_mut() {Some(d)=>d.next().await,None=>std::future::pending().await}}, if discovery.is_some()=>{
                 let Some(fresh)=fresh else { eprintln!("receiver: discovery stopped"); break; };
                 audio_guard.set_playing(false);connecting=None;voice_epoch+=1;
                 if let Some(reply)=pending_login.take(){let _=reply.send(Err("Login was replaced by another Spotify device"));}
@@ -1019,12 +1112,11 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                 connecting=None;
                 match result {
                     Some(Ok((handle,future)))=>{
-                        spirc=Some(handle);task=Some(tokio::spawn(future));backoff=5;fallback=None;eprintln!("receiver: Spotify connected");
+                        spirc=Some(Handle::Librespot(handle));task=Some(tokio::spawn(future));backoff=5;fallback=None;eprintln!("receiver: Spotify connected");
                         if let Some(reply)=pending_login.take(){let _=reply.send(Ok(()));}
                         if let Some(uri)=retry_track.take() && let Some(handle)=spirc.as_ref() {
                             let _=handle.activate();
-                            let request=LoadRequest::from_tracks(vec![uri],LoadRequestOptions{start_playing:true,..Default::default()});
-                            let _=handle.load(request);
+                            let _=handle.load_uri(uri);
                         }
                     },
                     Some(Err(e))=>{
@@ -1198,6 +1290,12 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             Some(event)=voice_rx.recv()=>{
                 if event.received.elapsed()>VOICE_EXPIRY {continue;}
                 if event.from_voice && !voice_enabled {continue;}
+                if is_soloist && let voice::Intent::Play(query)=&event.intent && !soloist::playable(query) {
+                    soloist_error="Soloist: text search is not supported; select music in Spotify or pass a spotify:track/album/playlist/episode URI".into();
+                    info.backend_error=soloist_error.clone();
+                    publish_status(&shared,&playback,&failures,rejected,&mut info,&mut last_status,&mut status_buffer);
+                    continue;
+                }
                 let intent=match event.intent {
                     voice::Intent::Airplay(enabled)=>{
                         if let Err(e)=airplay.set_enabled(enabled){eprintln!("airplay: {e}");}
@@ -1212,6 +1310,13 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                         youtube.status(&mut info,&shared.airplay);
                         publish_status(&shared,&playback,&failures,rejected,&mut info,&mut last_status,&mut status_buffer);
                         continue;
+                    },
+                    voice::Intent::Retry if is_soloist=>{
+                        if let Some(handle)=spirc.take(){let _=handle.shutdown();}
+                        if let Some(task)=soloist_task.take(){let _=task.await;}
+                        let (handle,task,state)=soloist::spawn(base.clone(),options.state_dir.clone(),options.name.clone(),shared.airplay.clone());
+                        spirc=Some(Handle::Soloist(handle));soloist_task=Some(task);soloist_state=Some(state);
+                        soloist_error.clear();soloist_volume_revision=0;soloist_connected=false;playback.reset();continue;
                     },
                     voice::Intent::Retry=>{
                         if let Some(uri)=failures.retry() {
@@ -1301,14 +1406,13 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                     voice::Intent::Play(query)=>{
                         if !prepared {eprintln!("voice: could not cancel native conversation");continue;}
                         let _=handle.activate();
-                        let request=LoadRequest::from_context_uri(voice::context(&query),LoadRequestOptions{start_playing:true,..Default::default()});
-                        if handle.load(request).is_ok() {eprintln!("voice: Spotify music query queued");}
+                        let uri=if query.starts_with("spotify:") {query} else {voice::context(&query)};
+                        match handle.load_uri(uri) {Ok(())=>eprintln!("voice: Spotify music query queued"),Err(e)=>{eprintln!("voice: {e}");if is_soloist {soloist_error=e.to_string();}}}
                     },
                     voice::Intent::Resume if !shared.active.load(Ordering::Acquire) && last_track.is_some()=>{
                         if !prepared {continue;}
                         let _=handle.activate();
-                        let request=LoadRequest::from_tracks(vec![last_track.clone().unwrap()],LoadRequestOptions{start_playing:true,..Default::default()});
-                        if handle.load(request).is_ok() {eprintln!("voice: last Spotify track queued");}
+                        if handle.load_uri(last_track.clone().unwrap()).is_ok() {eprintln!("voice: last Spotify track queued");}
                     },
                     intent if shared.active.load(Ordering::Acquire)=>{
                         match intent {
@@ -1354,8 +1458,14 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         }
         let playing = playback.playing() || shared.airplay.active.load(Ordering::Acquire);
         audio_guard.set_playing(playing);
-        info.playplay_available = playplay::available(&base);
-        info.connected = spirc.is_some();
+        info.soloist_available = soloist_install::available();
+        info.playplay_available = !is_soloist && playplay::available(&base);
+        info.connected = if is_soloist {
+            soloist_connected
+        } else {
+            spirc.is_some()
+        };
+        info.backend_error = soloist_error.clone();
         info.native_guard = playing && audio_guard.healthy();
         publish_status(
             &shared,
@@ -1386,7 +1496,12 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         let _ = controls.join();
     }
     player.stop();
-    let _ = tokio::time::timeout(Duration::from_secs(2), discovery.shutdown()).await;
+    if let Some(discovery) = discovery.take() {
+        let _ = tokio::time::timeout(Duration::from_secs(2), discovery.shutdown()).await;
+    }
+    if let Some(task) = soloist_task.take() {
+        let _ = task.await;
+    }
     info.connected = false;
     info.native_guard = false;
     publish_status(

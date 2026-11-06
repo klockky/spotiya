@@ -71,6 +71,7 @@ fn offline_status(config: &Config, message: &str) {
     status.ducking = false;
     status.retry_required = false;
     status.login_refused.clear();
+    status.backend_error.clear();
     status.retry_after_secs = 0;
     status.failed_tracks = 0;
     status.error = message.to_owned();
@@ -175,6 +176,10 @@ pub async fn run(options: &Options) -> io::Result<()> {
         OsString::from("--name"),
         OsString::from(&options.name),
     ];
+    if let Some(backend) = options.backend {
+        args.push("--backend".into());
+        args.push(backend.name().into());
+    }
     if let Some(profile) = &options.profile {
         args.push("--profile".into());
         args.push(profile.into());

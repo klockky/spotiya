@@ -1,0 +1,30 @@
+{
+  "libc6_2.38-1ubuntu6.3_armhf.deb": {
+    "url": "https://old-releases.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.38-1ubuntu6.3_armhf.deb",
+    "sha256": "5202b9c8f0171930ff6ab98fdae1fa7e35cab0f88421576ecd420ed3b2e35cb5"
+  },
+  "libc6-dev_2.38-1ubuntu6.3_armhf.deb": {
+    "url": "https://old-releases.ubuntu.com/ubuntu/pool/main/g/glibc/libc6-dev_2.38-1ubuntu6.3_armhf.deb",
+    "sha256": "ffc16659f144a36ba7e7ad8b40c6a631afb4a1c3bf736f6b24eda7d762bb1a92"
+  },
+  "libglib2.0-dev_2.62.4-1~ubuntu19.10.2_armhf.deb": {
+    "url": "https://old-releases.ubuntu.com/ubuntu/pool/main/g/glib2.0/libglib2.0-dev_2.62.4-1~ubuntu19.10.2_armhf.deb",
+    "sha256": "4f94c742a964bf7512cd39d64c35372f6f985da4b85ffcdb19cdb943912ba0c1"
+  },
+  "apulse.tar.gz": {
+    "url": "https://codeload.github.com/i-rinat/apulse/tar.gz/5d654cecd18474b4e0d885e774bc41fcbbc9818b",
+    "sha256": "56608b90d1bf6637bb5011a4771aa33547ae0cbe4d2b10a01ebe6601db2f81e6"
+  },
+  "libglib2.0-0_2.62.4-1~ubuntu19.10.2_armhf.deb": {
+    "url": "https://old-releases.ubuntu.com/ubuntu/pool/main/g/glib2.0/libglib2.0-0_2.62.4-1~ubuntu19.10.2_armhf.deb",
+    "sha256": "cd301e99ff9f8691b36953f085212f077962b13ed07b739158a7872672f4e4f6"
+  },
+  "COPYING.RUNTIME": {
+    "url": "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-6.5.0/COPYING.RUNTIME",
+    "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+  },
+  "COPYING3": {
+    "url": "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-6.5.0/COPYING3",
+    "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+  }
+}
