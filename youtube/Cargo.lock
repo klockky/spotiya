@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "spotiya-youtube"
-version = "0.9.4"
+version = "0.10.0"
 dependencies = [
  "alsa",
  "axum",
