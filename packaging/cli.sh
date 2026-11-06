@@ -9,7 +9,10 @@ case "${1:-tui}" in
         ;;
     soloist)
         shift
-        [ "$#" -eq 1 ] && [ "$1" = key ] || { echo 'Usage: spotiya soloist key < PRIVATE_KEY_FILE' >&2; exit 1; }
+        if [ "$#" -ne 1 ] || [ "${1:-}" != key ]; then
+            echo 'Usage: spotiya soloist key < PRIVATE_KEY_FILE' >&2
+            exit 1
+        fi
         set -- --soloist-key
         ;;
     uninstall)
