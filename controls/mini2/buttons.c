@@ -153,7 +153,7 @@ int mini2_buttons_run(const struct mini2_config *config) {
     if (!config)
         return 1;
     control_config = *config;
-    /* Without O_CLOEXEC, helpers such as playplay-decoder inherit the grab. */
+    /* Without O_CLOEXEC, child processes inherit the grab. */
     int fd =
         control_config.input ? open(control_config.input, O_RDONLY | O_NONBLOCK | O_CLOEXEC) : -1;
     if (control_config.input && fd < 0) {

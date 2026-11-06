@@ -15,5 +15,3 @@ __pycache__/
 
 *.apk
 *.sdi
-/decoder/resources.h
-/decoder/playplay-decoder*

@@ -118,7 +118,7 @@ except Exception:
         self.assertEqual(self.calls(), ["--version", "install"])
         state = self.base / "receiver-state"
         state.mkdir()
-        saved = {state / "credentials.json": b"synthetic login", state / "profile.json": b"saved profile", self.base / "playplay": b"installed add-on"}
+        saved = {state / "credentials.json": b"synthetic login", state / "profile.json": b"saved profile", self.base / "youtube": b"installed add-on"}
         for path, data in saved.items():
             path.write_bytes(data)
         self.log.unlink()

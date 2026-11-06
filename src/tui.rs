@@ -877,7 +877,7 @@ impl AddonMenu {
             let label = if installing == Some(addon.id) {
                 "Installing"
             } else {
-                (addon.state)(status).label(addon.command.is_none() && addon.id != "soloist")
+                (addon.state)(status).label()
             };
             out.push(format!(
                 "{} {}   [{}]",
@@ -895,12 +895,8 @@ impl AddonMenu {
         } else if self.confirm_remove {
             out.push(format!("Press x again to remove {}", addon.name));
         } else if state.installed && addon.id == "soloist" {
-            out.push("Set key: /data/opt/solo/set-key.sh; then spotiya retry".into());
+            out.push("Enter: set API key (hidden input)".into());
             out.push("Select backend: spotiya backend soloist; spotiya restart".into());
-        } else if state.installed && addon.command.is_none() {
-            out.push(
-                "Ready; used automatically when ordinary Spotify audio keys are refused.".into(),
-            );
         } else if state.installed {
             out.push(format!(
                 "Enter: {} {}",
@@ -952,6 +948,53 @@ pub fn run(state_dir: &Path, show_addons: bool) -> io::Result<()> {
         result => result,
     }
 }
+#[derive(Default)]
+struct KeyPrompt {
+    value: String,
+    error: String,
+}
+impl KeyPrompt {
+    fn lines(&self) -> Vec<String> {
+        vec![
+            "SPOTIFY SOLOIST — API KEY".into(),
+            "Create a key: https://developer.spotify.com/dashboard/soloist".into(),
+            "Paste your API key. Input is hidden.".into(),
+            format!("{} characters entered", self.value.len()),
+            "Enter: save   Esc: cancel".into(),
+            self.error.clone(),
+        ]
+    }
+    // Returns true when the dialog should close; errors never include the input.
+    fn key(&mut self, key: u8, state: &Path, notice: &mut String) -> bool {
+        match key {
+            27 => {
+                *notice =
+                    "Key entry cancelled. Select Soloist and press Enter to try again.".into();
+                return true;
+            }
+            b'\r' | b'\n' => match crate::soloist::store_key(state, &self.value) {
+                Ok(()) => {
+                    *notice =
+                        "Key saved. Run spotiya retry; after switching backend, spotiya restart."
+                            .into();
+                    return true;
+                }
+                Err(_) => {
+                    self.error = "Could not save key: check the key and available storage.".into()
+                }
+            },
+            8 | 127 => {
+                self.value.pop();
+            }
+            c if (c.is_ascii_graphic() || c == b' ') && self.value.len() < 4097 => {
+                self.value.push(c as char)
+            }
+            _ => {}
+        }
+        false
+    }
+}
+
 fn session(state_dir: &Path, show_addons: bool) -> io::Result<()> {
     use std::io::BufRead;
     // Declared before the terminal so it drops after it: waiting for an install to stop
@@ -967,6 +1010,7 @@ fn session(state_dir: &Path, show_addons: bool) -> io::Result<()> {
     let mut addons = show_addons.then(AddonMenu::default);
     let (addon_messages, addon_rx) = mpsc::channel();
     let mut addon_notice = String::new();
+    let mut key_prompt: Option<KeyPrompt> = None;
     let (updates, rx) = mpsc::channel::<String>();
     let mut login_socket: Option<std::os::unix::net::UnixStream> = None;
     let mut screen = Screen::new(screen::Colors::detect());
@@ -1005,6 +1049,12 @@ fn session(state_dir: &Path, show_addons: bool) -> io::Result<()> {
                 crate::addons::Message::Finished(result) => {
                     if let Some(job) = addon_job.take() {
                         let addon = crate::addons::find(job.id)?;
+                        if result.is_ok()
+                            && addon.id == "soloist"
+                            && crate::soloist::key_required(state_dir)
+                        {
+                            key_prompt = Some(KeyPrompt::default());
+                        }
                         addon_notice = match result {
                             Err(e) => e.to_string(),
                             Ok(outcome) => match addon.command {
@@ -1037,7 +1087,9 @@ fn session(state_dir: &Path, show_addons: bool) -> io::Result<()> {
             last_draw = Instant::now() - Duration::from_secs(1);
         }
         if last_draw.elapsed() >= Duration::from_millis(250) {
-            if let Some(menu) = &addons {
+            if let Some(prompt) = &key_prompt {
+                draw_lines(&mut screen, prompt.lines())?;
+            } else if let Some(menu) = &addons {
                 menu.draw(
                     &mut screen,
                     &status,
@@ -1076,6 +1128,19 @@ fn session(state_dir: &Path, show_addons: bool) -> io::Result<()> {
                     let _ = s.shutdown(std::net::Shutdown::Both);
                 }
                 return Ok(());
+            }
+            if let Some(prompt) = key_prompt.as_mut() {
+                let finished = prompt.key(key, state_dir, &mut addon_notice);
+                if finished {
+                    key_prompt = None;
+                }
+                last_draw = Instant::now() - Duration::from_secs(1);
+                // Discard the rest of this input batch after saving/cancelling so a
+                // pasted newline or escape sequence cannot trigger an add-on action.
+                if finished {
+                    break;
+                }
+                continue;
             }
             if let Some(menu) = addons.as_mut() {
                 match menu.key(key) {
@@ -1122,7 +1187,10 @@ fn session(state_dir: &Path, show_addons: bool) -> io::Result<()> {
                             addon_notice = "An add-on installation is already running".into();
                         } else if (addon.state)(&status).installed {
                             addon_notice = match addon.command {
-                                None if addon.id == "soloist" => "Set key: /data/opt/solo/set-key.sh; select soloist backend, then restart".into(),
+                                None if addon.id == "soloist" => {
+                                    key_prompt = Some(KeyPrompt::default());
+                                    String::new()
+                                }
                                 None => {
                                     format!("{} ready; used automatically when needed", addon.name)
                                 }
@@ -1322,6 +1390,37 @@ fn session(state_dir: &Path, show_addons: bool) -> io::Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn soloist_key_dialog_hides_input_and_preserves_key_on_cancel() {
+        let dir = crate::installation::Temporary::new(&std::env::temp_dir(), "key-dialog").unwrap();
+        let mut prompt = KeyPrompt::default();
+        let mut notice = String::new();
+        for b in b"synthetic-key!" {
+            assert!(!prompt.key(*b, &dir.0, &mut notice));
+        }
+        assert!(!prompt.key(127, &dir.0, &mut notice));
+        assert!(!prompt.lines().join("\n").contains("synthetic-key"));
+        assert!(prompt.key(b'\r', &dir.0, &mut notice));
+        assert!(!notice.contains("synthetic-key"));
+        let key = dir.0.join("soloist/api-key");
+        assert_eq!(fs::read_to_string(&key).unwrap(), "synthetic-key\n");
+        let mut prompt = KeyPrompt::default();
+        assert!(!prompt.key(b'\r', &dir.0, &mut notice));
+        assert!(!prompt.error.is_empty());
+        assert!(prompt.key(27, &dir.0, &mut notice));
+        assert_eq!(fs::read_to_string(&key).unwrap(), "synthetic-key\n");
+    }
+    #[test]
+    fn soloist_key_dialog_rejects_overlong_pastes_instead_of_truncating() {
+        let dir = crate::installation::Temporary::new(&std::env::temp_dir(), "key-dialog").unwrap();
+        let mut prompt = KeyPrompt::default();
+        let mut notice = String::new();
+        for _ in 0..5000 {
+            prompt.key(b'x', &dir.0, &mut notice);
+        }
+        assert!(!prompt.key(b'\n', &dir.0, &mut notice));
+        assert!(crate::soloist::key_required(&dir.0));
+    }
+    #[test]
     fn addons_screen_shows_install_progress_and_service_states() {
         let mut menu = AddonMenu::default();
         let mut status = Status::default();
@@ -1373,20 +1472,14 @@ mod tests {
         }
         assert_eq!(menu.selected, 1);
         let frame = menu.lines(&status, 24, None, "");
-        assert!(frame.iter().any(|s| s.contains("Enter: download PlayPlay")));
-        status.playplay_available = true;
+        assert!(
+            frame
+                .iter()
+                .any(|s| s.contains("Enter: download and enable YouTube"))
+        );
+        status.youtube_available = true;
         let frame = menu.lines(&status, 24, None, "");
-        assert!(
-            frame
-                .iter()
-                .any(|s| s.contains("PlayPlay   [Ready (on demand)]"))
-        );
-        assert!(
-            frame
-                .iter()
-                .any(|s| s.contains("Ready; used automatically"))
-        );
-        assert!(!frame.iter().any(|s| s.contains("Enter: disable PlayPlay")));
+        assert!(frame.iter().any(|s| s.contains("Enter: enable YouTube")));
         assert!(matches!(menu.key(b'c'), Some(AddonAction::StopInstall)));
         assert!(matches!(menu.key(b'q'), Some(AddonAction::Cancel)));
     }
@@ -1416,11 +1509,7 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("Spotify Soloist   [Running]"))
         );
-        assert!(
-            frame
-                .iter()
-                .any(|s| s.contains("/data/opt/solo/set-key.sh"))
-        );
+        assert!(frame.iter().any(|s| s.contains("Enter: set API key")));
         assert!(frame.iter().any(|s| s == "u: update   x: remove"));
         assert!(
             !frame

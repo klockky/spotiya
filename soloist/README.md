@@ -75,11 +75,15 @@ cc -std=gnu99 -O2 -Wall -Wextra -Werror soloist/test-apulse-spectrum.c -lm -o /t
 
 ## Установка из дополнений
 
+После установки CLI или TUI запрашивает API-ключ, если его ещё нет. Ввод скрыт;
+обновление сохраняет существующий ключ. Enter на установленном Soloist в TUI
+позволяет заменить ключ. Для повторного ввода из терминала: `/data/opt/solo/set-key.sh`.
+
+
 Из релиза с пакетом совместимости для вашей версии Spotiya:
 
 ```sh
 spotiya addon install soloist
-/data/opt/solo/set-key.sh
 spotiya backend soloist
 spotiya restart
 ```

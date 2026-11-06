@@ -261,8 +261,52 @@ pub fn save_key(state: &Path) -> io::Result<()> {
     }
     let mut key = String::new();
     io::stdin().take(4097).read_to_string(&mut key)?;
+    store_key(state, &key)
+}
+
+fn valid_key(key: &str) -> bool {
+    !key.is_empty() && key.len() <= 4096 && key.bytes().all(|c| c.is_ascii_graphic())
+}
+
+pub fn key_required(state: &Path) -> bool {
+    let mut key = String::new();
+    fs::File::open(state.join("soloist/api-key"))
+        .and_then(|file| file.take(4097).read_to_string(&mut key))
+        .is_err()
+        || !valid_key(key.trim())
+}
+
+pub fn prompt_key_if_missing(state: &Path) -> io::Result<()> {
+    if !key_required(state) {
+        return Ok(());
+    }
+    if fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .is_err()
+    {
+        println!(
+            "Soloist needs an API key. Open a terminal and run /data/opt/solo/set-key.sh, then spotiya retry."
+        );
+        return Ok(());
+    }
+    println!("Create a personal key at https://developer.spotify.com/dashboard/soloist");
+    let result = std::process::Command::new("sh")
+        .arg("/data/opt/solo/set-key.sh")
+        .env("SPOTIYA_STATE_DIR", state)
+        .status()?;
+    if !result.success() {
+        println!(
+            "Soloist is installed; key setup was not completed. Run /data/opt/solo/set-key.sh to retry."
+        );
+    }
+    Ok(())
+}
+
+pub fn store_key(state: &Path, key: &str) -> io::Result<()> {
     let key = key.trim();
-    if key.is_empty() || key.len() > 4096 || key.chars().any(char::is_whitespace) {
+    if !valid_key(key) {
         return Err(io::Error::other("Invalid Soloist API key"));
     }
     let dir = state.join("soloist");
@@ -536,6 +580,43 @@ mod tests {
 #[cfg(test)]
 mod control_tests {
     use super::*;
+    #[test]
+    fn key_storage_is_private_atomic_and_preserved_on_invalid_input() {
+        let dir =
+            crate::installation::Temporary::new(&std::env::temp_dir(), "soloist-key").unwrap();
+        assert!(key_required(&dir.0));
+        store_key(&dir.0, " synthetic-key\n").unwrap();
+        assert!(!key_required(&dir.0));
+        let key = dir.0.join("soloist/api-key");
+        assert_eq!(
+            fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(dir.0.join("soloist"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        for invalid in [
+            "",
+            "with space",
+            "with\tseparator",
+            "with\0null",
+            &"x".repeat(4097),
+        ] {
+            assert!(store_key(&dir.0, invalid).is_err());
+            assert_eq!(fs::read_to_string(&key).unwrap(), "synthetic-key\n");
+        }
+        // Updating an installed runtime must never prompt or overwrite a valid key.
+        prompt_key_if_missing(&dir.0).unwrap();
+        assert_eq!(fs::read_to_string(&key).unwrap(), "synthetic-key\n");
+        assert_eq!(fs::read_dir(dir.0.join("soloist")).unwrap().count(), 1);
+        fs::write(&key, "").unwrap();
+        assert!(key_required(&dir.0));
+    }
     #[tokio::test(start_paused = true)]
     async fn coalesced_events_preserve_volume_and_position_anchor() {
         let mut s = State {

@@ -28,8 +28,6 @@ pub struct Addon {
     bins: &'static [&'static str],
     /// Receiver setting that keeps the add-on running; it must be off before removal.
     setting: Option<&'static str>,
-    /// Older single-file location that still counts as installed.
-    legacy: Option<&'static str>,
     pub command: Option<&'static str>,
     pub state: fn(&Status) -> State<'_>,
 }
@@ -40,11 +38,9 @@ pub struct State<'a> {
     pub error: &'a str,
 }
 impl State<'_> {
-    pub fn label(&self, on_demand: bool) -> &'static str {
+    pub fn label(&self) -> &'static str {
         if !self.installed {
             "Not installed"
-        } else if on_demand {
-            "Ready (on demand)"
         } else if !self.enabled {
             "Off"
         } else if !self.error.is_empty() {
@@ -67,32 +63,12 @@ pub static CATALOG: &[Addon] = &[
         directory: "airplay",
         bins: AIRPLAY_BINS,
         setting: Some("airplay-enabled"),
-        legacy: None,
         command: Some("AIRPLAY"),
         state: |s| State {
             installed: s.airplay_available,
             enabled: s.airplay_enabled,
             running: s.airplay_running,
             error: &s.airplay_error,
-        },
-    },
-    Addon {
-        id: "playplay",
-        name: "PlayPlay",
-        description: "Optional Spotify decoder. Used automatically only when ordinary audio keys are refused.",
-        asset: "spotiya-playplay-armv7.tar.gz",
-        sums: "PLAYPLAY_SHA256SUMS",
-        root: "spotiya-playplay",
-        directory: "playplay",
-        bins: &["playplay-decoder"],
-        setting: None,
-        legacy: Some("playplay-decoder"),
-        command: None,
-        state: |s| State {
-            installed: s.playplay_available,
-            enabled: true,
-            running: false,
-            error: "",
         },
     },
     Addon {
@@ -105,7 +81,6 @@ pub static CATALOG: &[Addon] = &[
         directory: "youtube",
         bins: &["spotiya-youtube"],
         setting: Some("youtube-enabled"),
-        legacy: None,
         command: Some("YOUTUBE"),
         state: |s| State {
             installed: s.youtube_available,
@@ -124,7 +99,6 @@ pub static CATALOG: &[Addon] = &[
         directory: "soloist",
         bins: &[],
         setting: None,
-        legacy: None,
         command: None,
         state: |s| State {
             installed: s.soloist_available,
@@ -268,9 +242,7 @@ fn validate_binaries(addon: &Addon, payload: &Path) -> io::Result<()> {
         if &header[..6] != b"\x7fELF\x01\x01" || header[18..20] != [40, 0] {
             return Err(error("Add-on requires ARMv7 Linux executables"));
         }
-        let argument = if *name == "playplay-decoder" {
-            "--info"
-        } else if matches!(*name, "shairport-sync" | "nqptp") {
+        let argument = if matches!(*name, "shairport-sync" | "nqptp") {
             "-V"
         } else {
             "--version"
@@ -278,20 +250,6 @@ fn validate_binaries(addon: &Addon, payload: &Path) -> io::Result<()> {
         let result = installation::command(&file, &[argument.as_ref()], Duration::from_secs(5))?;
         if !result.status.success() {
             return Err(error(format!("{name} cannot run on this station")));
-        }
-        if *name == "playplay-decoder" {
-            #[derive(Deserialize)]
-            struct DecoderInfo {
-                protocol_version: u32,
-                network: bool,
-            }
-            let info: DecoderInfo = serde_json::from_slice(&result.stdout)
-                .map_err(|_| error("Invalid PlayPlay decoder information"))?;
-            if info.protocol_version != 1 || info.network {
-                return Err(error("Unsupported PlayPlay decoder protocol"));
-            }
-            librespot::audio::playplay::PlayPlayDecoder::configuration(&file)
-                .map_err(|_| error("PlayPlay decoder configuration check failed"))?;
         }
         if *name == "shairport-sync"
             && !String::from_utf8_lossy(&result.stdout).contains("AirPlay2")
@@ -312,8 +270,12 @@ impl Outcome {
         if addon.id == "soloist" {
             return match self {
                 Outcome::Current => "Soloist is already up to date".into(),
-                Outcome::Installed => "Soloist installed.\nKey: /data/opt/solo/set-key.sh\nUse: spotiya backend soloist; spotiya restart".into(),
-                Outcome::Updated => "Soloist updated; run spotiya retry (restart after switching backend)".into(),
+                Outcome::Installed => {
+                    "Soloist installed.\nUse: spotiya backend soloist; spotiya restart".into()
+                }
+                Outcome::Updated => {
+                    "Soloist updated; run spotiya retry (restart after switching backend)".into()
+                }
             };
         }
         match self {
@@ -321,7 +283,6 @@ impl Outcome {
                 format!("{} installed; ready on demand", addon.name)
             }
             Outcome::Installed => format!("{} installed", addon.name),
-            // The PlayPlay resolver notices a replaced decoder; running services do not.
             Outcome::Updated if addon.command.is_none() => format!("{} updated", addon.name),
             Outcome::Updated => format!(
                 "{} updated; restart the receiver to load the new version",
@@ -419,17 +380,10 @@ pub fn remove(id: &str, base: &Path) -> io::Result<()> {
         return Err(error(format!("Disable {} before removing it", addon.name)));
     }
     let target = base.join(addon.directory);
-    let legacy = addon.legacy.map(|name| base.join(name));
     let mut removed = false;
     if target.symlink_metadata().is_ok() {
         let stage = Temporary::new(base, "addon-remove")?;
         fs::rename(&target, stage.0.join(addon.directory))?;
-        removed = true;
-    }
-    if let Some(legacy) = legacy
-        && legacy.symlink_metadata().is_ok()
-    {
-        fs::remove_file(legacy)?;
         removed = true;
     }
     if !removed {
@@ -751,7 +705,7 @@ mod tests {
         assert!(!dir.0.join("airplay").exists());
     }
     #[test]
-    fn removal_requires_a_disabled_service_and_clears_legacy_files() {
+    fn removal_requires_a_disabled_service() {
         let dir = fixture();
         let airplay = &CATALOG[0];
         let (path, sums) = archive(&dir.0, false, None);
@@ -766,15 +720,6 @@ mod tests {
         remove("airplay", &dir.0).unwrap();
         assert!(!dir.0.join("airplay").exists());
         assert!(remove("airplay", &dir.0).is_err());
-        fs::write(dir.0.join("playplay-decoder"), b"legacy").unwrap();
-        fs::set_permissions(
-            dir.0.join("playplay-decoder"),
-            fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-        assert!(crate::playplay::available(&dir.0));
-        remove("playplay", &dir.0).unwrap();
-        assert!(!crate::playplay::available(&dir.0));
         unchanged(&dir.0);
         assert!(!fs::read_dir(&dir.0).unwrap().any(|e| {
             e.unwrap()
@@ -782,17 +727,6 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".addon-remove-")
         }));
-    }
-    #[test]
-    fn playplay_installation_is_independent_of_airplay_and_receiver_state() {
-        let dir = fixture();
-        let addon = find("playplay").unwrap();
-        let (path, sums) = archive_for(addon, &dir.0, false, None);
-        install_verified(addon, &dir.0, &path, &sums, |_, _| Ok(())).unwrap();
-        assert!(crate::playplay::available(&dir.0));
-        assert!(!airplay_available(&dir.0));
-        assert!(!dir.0.join("receiver-state/airplay-enabled").exists());
-        unchanged(&dir.0);
     }
     #[test]
     fn extraction_uses_actual_payload_space_and_rejects_a_smaller_budget() {

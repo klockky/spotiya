@@ -25,7 +25,6 @@ pub struct Status {
     pub spotify_backend: String,
     pub backend_error: String,
     pub soloist_available: bool,
-    pub playplay_available: bool,
     pub airplay_available: bool,
     pub airplay_enabled: bool,
     pub airplay_running: bool,
