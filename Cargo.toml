@@ -1,6 +1,6 @@
 [package]
 name = "spotiya"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 license = "MIT"
 description = "Spotify Connect and voice control for Yandex Stations"

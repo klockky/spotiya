@@ -4,7 +4,7 @@
 
 [package]
 name = "spotiya-youtube"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 license = "MIT"
 description = "YouTube and YouTube Music cast receiver add-on for Spotiya"
