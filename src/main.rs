@@ -57,6 +57,7 @@ use spotify_backend::{Backend, Handle};
 mod tui;
 mod update;
 mod voice;
+mod webapi;
 mod volume_guard;
 mod youtube;
 
@@ -890,6 +891,7 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut events = player.get_player_event_channel();
     let (voice_tx, mut voice_rx) = mpsc::channel(8);
+    let search_tx = voice_tx.clone();
     let voice_watch = native.map(|address| {
         tokio::spawn(voice::watch(
             voice_tx.clone(),
@@ -1286,6 +1288,19 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             Some(event)=voice_rx.recv()=>{
                 if event.received.elapsed()>VOICE_EXPIRY {continue;}
                 if event.from_voice && !voice_enabled {continue;}
+                if is_soloist && let voice::Intent::Play(query)=&event.intent && !soloist::playable(query)
+                    && webapi::credentials_path(&options.state_dir).exists() {
+                    // Soloist has no text search: resolve the query through the Web API
+                    // and feed the resulting URI back as a fresh voice event.
+                    let (query,state,tx,from_voice)=(query.clone(),options.state_dir.clone(),search_tx.clone(),event.from_voice);
+                    tokio::spawn(async move {
+                        match webapi::search(&state,&query).await {
+                            Ok(uri)=>{let _=tx.send(voice::Event{intent:voice::Intent::Play(uri),received:Instant::now(),from_voice}).await;},
+                            Err(e)=>eprintln!("voice: {e}"),
+                        }
+                    });
+                    continue;
+                }
                 if is_soloist && let voice::Intent::Play(query)=&event.intent && !soloist::playable(query) {
                     soloist_error="Soloist: text search is not supported; select music in Spotify or pass a spotify:track/album/playlist/episode URI".into();
                     info.backend_error=soloist_error.clone();
