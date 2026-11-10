@@ -32,10 +32,26 @@ impl Ducking {
         };
         self.until.store(until, Ordering::Release);
         self.volume.activity(busy);
+        signal_external(busy);
     }
     pub fn active(&self) -> bool {
         let until = self.until.load(Ordering::Acquire);
         until != 0 && until.wrapping_sub(self.origin.elapsed().as_millis() as u32) as i32 > 0
+    }
+}
+
+/// Soloist renders audio in its own process, so [`Gain`] never sees its samples.
+/// Our apulse (soloist/apulse-duck.c) ducks the stream while this file exists and is
+/// fresh; rewriting it on every busy event keeps its mtime inside apulse's hold time.
+pub const EXTERNAL: &str = "/run/spotiya-duck";
+fn signal_external(busy: bool) {
+    if cfg!(test) {
+        return;
+    }
+    if busy {
+        let _ = std::fs::write(EXTERNAL, b"");
+    } else {
+        let _ = std::fs::remove_file(EXTERNAL);
     }
 }
 

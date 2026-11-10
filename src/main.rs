@@ -868,6 +868,7 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let backend = audio_backend::find(Some("alsa".into())).expect("ALSA compiled");
     let visual = shared.spectrum.clone();
     let airplay_gate = shared.airplay.clone();
+    let _ = std::fs::remove_file(ducking::EXTERNAL);
     let ducking = shared.ducking.clone();
     let audio_device = profile.audio.device.clone();
     let audio_format = profile
