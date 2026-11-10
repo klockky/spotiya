@@ -10,15 +10,16 @@
      pa_stream_direction_t direction;
 --- a/src/apulse-stream.c
 +++ b/src/apulse-stream.c
-@@ -25,6 +25,7 @@
+@@ -25,6 +25,8 @@
  #include "apulse.h"
  #include "trace.h"
  #include "util.h"
 +#include "apulse-spectrum.h"
++#include "apulse-duck.h"
  
  #define MAKE_SND_LIB_VERSION(a, b, c) (((a) << 16) | ((b) << 8) | (c))
  
-@@ -172,6 +173,7 @@
+@@ -172,6 +174,7 @@
  
      if (events & PA_IO_EVENT_OUTPUT) {
          if (paused) {
@@ -26,7 +27,7 @@
              // client stream is corked. Pass silence to ALSA
              size_t bytecnt = MIN(buf_size, frame_count * frame_size);
              memset(buf, 0, bytecnt);
-@@ -187,14 +189,19 @@
+@@ -187,14 +190,22 @@
              size_t bytecnt = MIN(buf_size, frame_count * frame_size);
              bytecnt = ringbuffer_read(s->rb, buf, bytecnt);
  
@@ -34,6 +35,9 @@
 +            const char *hardware_volume = getenv("SPOTIYA_SOLOIST_HARDWARE_VOLUME");
 +            if (!hardware_volume || strcmp(hardware_volume, "1") != 0)
 +                pa_apply_volume_multiplier(buf, bytecnt, s->volume, &s->ss);
++            if (s->ss.format == PA_SAMPLE_FLOAT32NE || s->ss.format == PA_SAMPLE_S16NE)
++                spotiya_duck(buf, bytecnt, s->ss.rate, s->ss.channels,
++                    s->ss.format == PA_SAMPLE_FLOAT32NE ? SPOTIYA_DUCK_FLOAT32 : SPOTIYA_DUCK_S16);
  
              if (bytecnt == 0) {
                  // application is not ready yet, play silence
@@ -48,7 +52,7 @@
          }
      }
  
-@@ -878,10 +885,11 @@
+@@ -878,10 +889,11 @@
      g_free(s_map);
  
      pa_stream *s = calloc(1, sizeof(pa_stream));
@@ -61,7 +65,7 @@
  
      s->idx = c->next_stream_idx++;
      g_hash_table_insert(c->streams_ht, GINT_TO_POINTER(s->idx), s);
-@@ -1020,6 +1028,8 @@
+@@ -1020,6 +1032,8 @@
      s->ref_cnt--;
      if (s->ref_cnt == 0) {
          g_hash_table_remove(s->c->streams_ht, GINT_TO_POINTER(s->idx));

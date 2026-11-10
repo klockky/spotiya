@@ -16,7 +16,8 @@ trap 'rm -rf "$stage"' EXIT
 src=$stage/apulse
 mkdir "$src"
 cp -a "$source_dir/src" "$source_dir/3rdparty" "$src/"
-cp "$repo/soloist/apulse-spectrum.c" "$repo/soloist/apulse-spectrum.h" "$src/src/"
+cp "$repo/soloist/apulse-spectrum.c" "$repo/soloist/apulse-spectrum.h" \
+    "$repo/soloist/apulse-duck.c" "$repo/soloist/apulse-duck.h" "$src/src/"
 patch --directory="$src" -p1 --forward --force < "$repo/soloist/apulse-spotiya.patch"
 "$sdk/bin/arm-linux-gnueabihf-gcc" -Os -fPIC -ffunction-sections -c "$repo/controls/alsa_compat.c" -o "$stage/alsa_compat.o"
 wrap=''
@@ -36,7 +37,7 @@ done
     -shared -Wl,-soname,libpulse.so.0 -Wl,--gc-sections -Wl,--allow-shlib-undefined \
     -Wl,--version-script="$src/src/symbolmap" $wrap \
     "$src"/src/apulse-{channel-map,common,context,ext,format-info,mainloop,misc,operation,proplist,signal,stream,threaded-mainloop,volume}.c \
-    "$src"/src/{ringbuffer,util,trace,apulse-spectrum}.c \
+    "$src"/src/{ringbuffer,util,trace,apulse-spectrum,apulse-duck}.c \
     "$stage/alsa_compat.o" \
     -L"$sysroot/usr/lib/arm-linux-gnueabihf" -L"$sysroot/lib/arm-linux-gnueabihf" \
     -L"$alsa/usr/lib" -lglib-2.0 -lasound -lm -pthread \
@@ -49,4 +50,6 @@ done
     -o "$output/test-apulse-lifetime"
 "$sdk/bin/arm-linux-gnueabihf-gcc" -std=gnu99 -Os -Wall -Wextra -Werror \
     "$repo/soloist/test-apulse-spectrum.c" -lm -o "$output/test-apulse-spectrum"
-echo "Built $output/libpulse.so.0 and lifetime/spectrum tests"
+"$sdk/bin/arm-linux-gnueabihf-gcc" -std=gnu99 -Os -Wall -Wextra -Werror -I"$repo/soloist" \
+    "$repo/soloist/test-apulse-duck.c" "$repo/soloist/apulse-duck.c" -lm -o "$output/test-apulse-duck"
+echo "Built $output/libpulse.so.0 and lifetime/spectrum/duck tests"
